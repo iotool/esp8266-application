@@ -108,10 +108,10 @@ void loop() {
       // debug SSID via serial
       for (int i=0; i<scanN; i++) {
         if(WiFi.channel(i)!=AP_CHANNEL){
-          // filter same channel
+          // filter: ignore other channels
         } else 
         if (!String(WiFi.SSID(i).c_str()).startsWith(apName)) {
-          // filter same access point names
+          // filter: ignore other access point names
         } else 
         if (true) {
           scanF++;
