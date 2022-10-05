@@ -108,8 +108,11 @@ void loop() {
       // debug SSID via serial
       for (int i=0; i<scanN; i++) {
         if(WiFi.channel(i)!=AP_CHANNEL){
+          // filter same channel
         } else 
-        if (!String(WiFi.SSID(i).c_str()).startsWith(apName)) {} else 
+        if (!String(WiFi.SSID(i).c_str()).startsWith(apName)) {
+          // filter same access point names
+        } else 
         if (true) {
           scanF++;
           Serial.printf("%d: %s, Ch:%d (%ddBm) %s\n", i+1, WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i), WiFi.encryptionType(i) == ENC_TYPE_NONE ? "open" : "");
