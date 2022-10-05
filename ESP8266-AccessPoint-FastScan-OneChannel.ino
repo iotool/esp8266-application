@@ -10,6 +10,15 @@
 // the wifi_set_country to reduce the scan
 // to a single channel (2300ms to 110ms).
 //
+// You can use this sketch for range tests.
+// Install this sketch to two ESP8266 devices.
+// One of them you can connect via USB-C to
+// your smartphone with a serial terminal app
+// to debug the RSSI of each filtered SSID.
+// The builtin led will blink, if data receive.
+// We are using stateless wifi breacon frames
+// and network scan for this range test.
+// 
 // 2022-10-05 V1
 // 802.11b -20dBm for longer range 120m
 // async network scan in background
