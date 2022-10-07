@@ -20,3 +20,4 @@
 - reboot on out of memory before freez
 - reboot use rtc memory for chatdata
 - OTA update for ArduinoDroid
+- CLI for admin login, ota, restart
