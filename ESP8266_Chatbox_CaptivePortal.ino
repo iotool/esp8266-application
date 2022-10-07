@@ -13,6 +13,8 @@
 // reboot on out of memory
 // reboot use rtc memory for chat
 // OTA update for ArduinoDroid
+// OTA password protect by cli
+// admin cli for status, ota, restart
 
 // overwrite esp-sdk (wifi_set_country)
 extern "C" {
@@ -34,6 +36,8 @@ extern "C" {
 #define ESP_OUTMEM 2048  // reboot
 #define ESP_RTCADR 65    // offset
 #define ESP_RTCMEM 443   // buffer rtc
+#define LED_OFF    0
+#define LED_ON     1
 
 const char* apName = "Chatbox-";
 const char* apPass = "";
@@ -55,7 +59,20 @@ typedef struct {
 } rtcStore;
 rtcStore rtcMem;
 
+// Flags
+struct {
+  uint8_t enableCliCommand:1;
+  uint8_t enableOtaUpdate:1;
+  uint8_t disconnectClients:1;
+  uint8_t builtinLedMode:2;
+  uint8_t reserve:3;
+} flag = {0,0,0,0,0};
+
 void setup() {
+
+  // builtin led
+  pinMode(LED_BUILTIN,OUTPUT);
+  digitalWrite(LED_BUILTIN,HIGH);
     
   // serial debug
   Serial.begin(19200);
@@ -139,6 +156,7 @@ void setup() {
   httpServer.on("/chat",onHttpChat);
   httpServer.on("/chatf",onHttpChatFrm);
   httpServer.on("/chata",onHttpChatAdd);
+  httpServer.on("/cli",onHttpCli);
   httpServer.begin();
 
   // ota: update
@@ -151,26 +169,26 @@ void setup() {
   ArduinoOTA.onEnd([]()
     {Serial.println("\nOTA End");});
   ArduinoOTA.begin();
-    
+  
   delay(100);
 }
 
 uint32_t uptime=0;
+uint32_t uptimeLast=0;
 uint8_t requests=0;
-boolean disconnectClients=false;
 uint8_t disconnectTimer=0;
 
 void loop() {
+  uint32_t uptimeLast=uptime;
   uptime=millis();
-  doDebug();
-  doServer();
-  doDisconnect();
-  doReboot();
-  yield();
-}
-
-void doTasks() {
-  delay(1);
+  if (uptime!=uptimeLast) {
+    // every millisecond
+    doLed();
+    doDebug();
+    doServer();
+    doDisconnect();
+    doReboot();
+  }
   yield();
 }
 
@@ -192,23 +210,24 @@ void doDisconnect() {
     if (disconnectTimer>1) {
       // increase timer 13ms
       disconnectTimer--;
-      delay(1);
     } else if (disconnectTimer==1) {
       // end timer, if max client > 3s
       disconnectTimer=0;
-      disconnectClients=true;
+      flag.disconnectClients=1;
     }
   }
-  if (disconnectClients) {
+  if (flag.disconnectClients==1) {
     // disconnect all clients
-    disconnectClients=false;
+    flag.disconnectClients=0;
     WiFi.softAPdisconnect(false);
     WiFi.softAP(
       apSSID,apPass,AP_CHANNEL
     );
+    yield();
     if (String(apPass).length()==0) {
       WiFi.softAP(apSSID);
     }
+    yield();
   }
 }
 
@@ -226,7 +245,8 @@ void doBackup() {
   }
   system_rtc_mem_write(
     ESP_RTCADR,&rtcMem,sizeof(rtcMem)
-  );     
+  );
+  yield();
 }
 
 void doReboot() {
@@ -236,10 +256,23 @@ void doReboot() {
       doBackup();
       delay(300);
       WiFi.softAPdisconnect(true);
+      yield();
       delay(200);
       ESP.restart();
     }
   }
+}
+
+void doLed() {
+  switch(flag.builtinLedMode) {
+    case LED_OFF:
+      digitalWrite(LED_BUILTIN,HIGH);
+      break;
+    case LED_ON:
+      digitalWrite(LED_BUILTIN,LOW);
+      break;
+  }
+  yield();
 }
 
 void doDebug(){
@@ -261,7 +294,7 @@ void doDebug(){
     Serial.print(F("T"));
     Serial.println();
     requests=0;
-    doTasks();
+    yield();
   }
 }
 
@@ -272,11 +305,13 @@ void doServer() {
     // 13: 76 Req/s ~  7.7 KB/Req
     // 17: 58 Req/s ~ 10.3 KB/Req
     dnsServer.processNextRequest();
-    doTasks();
+    yield();
     httpServer.handleClient();
-    doTasks();
-    ArduinoOTA.handle();
-    doTasks();
+    yield();
+    if (flag.enableOtaUpdate == 1) {
+      ArduinoOTA.handle();
+      yield();
+    }
   }
 }
 
@@ -298,7 +333,7 @@ void onHttpToHome() {
     302, F("text/plain"), F("")
   );
   requests++;
-  doTasks();
+  yield();
 }
 
 void onHttpHome() {
@@ -306,7 +341,7 @@ void onHttpHome() {
     200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>WiFi Chat</h1><hr><br>Dieser Hotspot bietet einen lokalen Chat. Die Nachrichten werden nicht dauerhaft gespeichert. Bitte alle rechtlichen Regeln einhalten und keine Beleidigungen!<br><br><a href=/chat>OK - akzeptiert</a></body></html>")
   );
   requests++;
-  doTasks();
+  yield();
 }
 
 void onHttpChat() {
@@ -337,7 +372,7 @@ void onHttpChat() {
   );
   html="";
   requests++;
-  doTasks();
+  yield();
 }
 
 void onHttpChatFrm() {
@@ -345,7 +380,7 @@ void onHttpChatFrm() {
     200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>WiFi Chat</h1><hr><a href=/chat>abbrechen</a><hr><br><form action=/chata method=POST>Absender:<br><input type=text name=usr><br><br>Nachricht:<br><textarea name=msg rows=3 cols=22></textarea><br><br><input type=submit value=senden></form></body></html>")
   );
   requests++;
-  doTasks();
+  yield();
 }
 
 String maskHttpArg(String id) {
@@ -378,5 +413,68 @@ void onHttpChatAdd() {
   );
   html=""; usr=""; msg="";
   requests++;
-  doTasks();
+  yield();
+}
+
+void onHttpCli() {
+  String text= F(
+    "Version: 20221007-1146\n"
+    "/cli?cmd=login-password\n"
+    "/cli?cmd=logoff\n"
+    "/cli?cmd=restart\n"
+    "/cli?cmd=ota-on\n"
+    "/cli?cmd=ota-off\n"
+    "\n"
+    "OTA-Update\n\n"
+    "1. wifi connect\n"
+    "2. disable firewall\n"
+    "3. login-password\n"
+    "4. ota-on (led on)\n"
+    "5. arduinodroid upload wifi\n"
+    "   server: web.local\n"
+    "   port: 8266\n"
+    "6. on-error use restart\n"
+    "\n"
+    "ESP-Status\n"
+  );
+  text+="\nUptime:"+String(uptime);
+  text+="\nClients:"+String(
+    WiFi.softAPgetStationNum());
+  text+="\nRequests:"+String(requests);
+  text+="\nMemory:"+String(
+    system_get_free_heap_size());
+  text+="\nRtcCheck:"+String(
+    rtcMem.check);
+  text+="\nCliLogin:"+String(
+    flag.enableCliCommand);
+  text+="\nCliOta:"+String(
+    flag.enableOtaUpdate);
+  httpServer.send(
+      200,F("text/plain"),text
+  );
+  text="";
+  String cmd=httpServer.arg("cmd");
+  if (cmd == F("login-password")) {
+    flag.enableCliCommand=1;
+  }
+  if (flag.enableCliCommand==1) {
+    if (cmd == F("logoff")) {
+      flag.enableCliCommand=0;
+      flag.enableOtaUpdate = 0;
+      flag.builtinLedMode=LED_OFF;
+    }
+    if (cmd == F("restart")) {
+      ESP.restart();
+    }
+    if (cmd ==  F("ota-off")) {
+      flag.enableOtaUpdate = 0;
+      flag.builtinLedMode=LED_OFF;
+    }
+    if (cmd ==  F("ota-on")) {
+      flag.enableOtaUpdate = 1;
+      flag.builtinLedMode=LED_ON;
+    }
+  }
+  requests++;
+  yield();
 }
