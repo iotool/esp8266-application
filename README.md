@@ -17,6 +17,6 @@
 - max client 8 connections
 - max client auto disconnect after 3s
 - serial debug state / free heap
-- reboot on out of memory bwfore freez
+- reboot on out of memory before freez
 - reboot use rtc memory for chatdata
 - OTA update for ArduinoDroid
