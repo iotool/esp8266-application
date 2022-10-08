@@ -36,7 +36,7 @@ extern "C" {
 #define AP_POWER   20    // 0..20 Lo/Hi
 #define AP_CHANNEL 13    // 1..13
 #define AP_MAXCON  8     // 1..8
-#define AP_CHATMEM 4096  // buffer esp
+#define AP_CHATMEM 2048  // buffer esp
 #define ESP_OUTMEM 2048  // reboot
 #define ESP_RTCADR 65    // offset
 #define ESP_RTCMEM 443   // buffer rtc
@@ -67,7 +67,7 @@ typedef struct {
 rtcStore rtcMem;
 
 // V1: use DRAM for buffer
-String chatData="Admin: Chat gestartet";
+String chatData="Admin~WEB: Welcome\n";
 
 // V2: 64B/message (static ~ nicht DRAM)
 typedef struct {
@@ -98,6 +98,8 @@ void setup() {
   );
   if (rtcMem.check == 0xDE49) {
     chatData=String(rtcMem.chat);
+    chatData=chatData.substring(
+        0,chatData.lastIndexOf("\n"));
   }
     
   // wifi: don't write setup to flash
@@ -352,9 +354,14 @@ void addChat(
     ms=ms+": ";
   }
   if (ms.length()+mb.length()>0) {
-    chatData=ms+mb+"<br><br>"+chatData;
-    chatData=
-      chatData.substring(0,AP_CHATMEM);
+    chatData=ms+mb+"<br><br>\n" \
+            +chatData;
+    if (chatData.length()>AP_CHATMEM) {
+      chatData=chatData.substring(
+        0,AP_CHATMEM);
+      chatData=chatData.substring(
+        0,chatData.lastIndexOf("\n"));
+    }
     doBackup();
   }
   ms="";
@@ -475,9 +482,10 @@ void onHttpChatAdd() {
     F("Refresh"), urlChatRefresh
   );
   String ms = maskHttpArg("ms");
-  ms=ms.substring(0,16);
+  ms.replace("~","-");
+  ms = ms.substring(0,16);
   String mr = maskHttpArg("mr");
-  mr=mr.substring(0,16);
+  mr = mr.substring(0,16);
   String mb = maskHttpArg("mb");
   mb=mb.substring(
     0,56-ms.length()-mr.length());
@@ -502,7 +510,7 @@ void onHttpChatAdd() {
 
 void onHttpCli() {
   String text= F(
-    "Version: 20221008-0933\n"
+    "Version: 20221009-0116\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
