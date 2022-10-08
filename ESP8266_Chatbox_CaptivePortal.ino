@@ -36,14 +36,14 @@ extern "C" {
 #define AP_POWER   20    // 0..20 Lo/Hi
 #define AP_CHANNEL 13    // 1..13
 #define AP_MAXCON  8     // 1..8
-#define AP_CHATMEM 2048  // buffer esp
+#define AP_CHATMEM 4096  // buffer esp
 #define ESP_OUTMEM 2048  // reboot
 #define ESP_RTCADR 65    // offset
 #define ESP_RTCMEM 443   // buffer rtc
 #define LED_OFF    0
 #define LED_ON     1
 #define CHAT_MLEN  56    // msg length
-#define CHAT_MARY  64    // msg array
+#define CHAT_MARY  1     // msg array 64
 
 const char* apName = "Chatbox-";
 const char* apPass = "";
@@ -181,7 +181,7 @@ void setup() {
     {Serial.println("OTA Start");});
   ArduinoOTA.onEnd([]()
     {Serial.println("\nOTA End");});
-  ArduinoOTA.begin();
+  // ArduinoOTA.begin();
   
   delay(100);
 }
@@ -192,10 +192,11 @@ void setup() {
 struct {
   uint8_t enableCliCommand:1;
   uint8_t enableOtaUpdate:1;
+  uint8_t beginOtaServer:1;
   uint8_t disconnectClients:1;
   uint8_t builtinLedMode:2;
-  uint8_t reserve:3;
-} flag = {0,0,0,0,0};
+  uint8_t reserve:2;
+} flag = {0,0,0,0,0,0};
 
 // time
 uint32_t uptime=0;
@@ -226,7 +227,12 @@ void doServer() {
     httpServer.handleClient();
     yield();
     if (flag.enableOtaUpdate == 1) {
-      ArduinoOTA.handle();
+      if (flag.beginOtaServer == 0) {
+        flag.beginOtaServer = 1;
+        ArduinoOTA.begin();
+      } else {
+        ArduinoOTA.handle();
+      }
       yield();
     }
   }
@@ -496,7 +502,7 @@ void onHttpChatAdd() {
 
 void onHttpCli() {
   String text= F(
-    "Version: 20221008-0106\n"
+    "Version: 20221008-0933\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
