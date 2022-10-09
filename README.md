@@ -1,5 +1,9 @@
 # ESP8266 Application
 
+- wifi_softap_set_config.max_connection <= 253
+- softAP assign up to 253 ip addresses
+- softAP handle max 8 clients and igrone others
+
 ## Access Point - Fast Scan - One Channel
 
 - 802.11b -20dBm for longer range
