@@ -32,18 +32,19 @@ extern "C" {
 
 /* --- configuration --- */
 
-#define AP_PHYMOD  WIFI_PHY_MODE_11B
-#define AP_POWER   20    // 0..20 Lo/Hi
-#define AP_CHANNEL 13    // 1..13
-#define AP_MAXCON  8     // 1..8
-#define AP_CHATMEM 2048  // buffer esp
-#define ESP_OUTMEM 2048  // reboot
-#define ESP_RTCADR 65    // offset
-#define ESP_RTCMEM 443   // buffer rtc
-#define LED_OFF    0
-#define LED_ON     1
-#define CHAT_MLEN  56    // msg length
-#define CHAT_MARY  1     // msg array 64
+#define AP_PHYMOD   WIFI_PHY_MODE_11B
+#define AP_POWER    20   // 0..20 Lo/Hi
+#define AP_CHANNEL  13   // 1..13
+#define AP_MAXCON   8    // 1..8 conns
+#define AP_MAXTOUT  15   // 1..25 sec
+#define AP_CHATMEM  2048 // buffer esp
+#define ESP_OUTMEM  4096 // autoreboot
+#define ESP_RTCADR  65   // offset
+#define ESP_RTCMEM  443  // buffer rtc
+#define LED_OFF     0
+#define LED_ON      1
+#define CHAT_MLEN   56    // msg length
+#define CHAT_MARY   1     // msg array
 
 const char* apName = "Chatbox-";
 const char* apPass = "";
@@ -64,7 +65,7 @@ typedef struct {
   uint32_t check;
   char chat[ESP_RTCMEM];
 } rtcStore;
-rtcStore rtcMem;
+/* rtcStore rtcMem; */
 
 // V1: use DRAM for buffer
 String chatData="Admin~WEB: Welcome\n";
@@ -93,6 +94,7 @@ void setup() {
   delay(50);
     
   // RTC restore after reset
+  rtcStore rtcMem;
   system_rtc_mem_read(
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
   );
@@ -253,7 +255,7 @@ void doDisconnect() {
         == AP_MAXCON) {
       if (disconnectTimer==0) {
         // start timer 10s
-        disconnectTimer=100;
+        disconnectTimer=10*AP_MAXTOUT;
       }
     } else {
       // stop timer
@@ -280,6 +282,11 @@ void doDisconnect() {
       WiFi.softAP(apSSID);
     }
     yield();
+    struct softap_config apConfig;
+    wifi_softap_get_config(&apConfig);
+    apConfig.max_connection = AP_MAXCON;
+    wifi_softap_set_config(&apConfig);
+    yield();
   }
 }
 
@@ -289,11 +296,13 @@ void doReboot() {
     if (system_get_free_heap_size()
         < ESP_OUTMEM) {
       doBackup();
-      delay(300);
+      delay(100);
       WiFi.softAPdisconnect(true);
-      yield();
       delay(200);
+      yield();
       ESP.restart();
+      delay(200);
+      yield();
     }
   }
 }
@@ -316,6 +325,11 @@ uint8_t requests=0;
 
 void doDebug(){
   if (uptime%1009==0) {
+    // rtc backup
+    rtcStore rtcMem;
+    system_rtc_mem_read(
+      ESP_RTCADR,&rtcMem,sizeof(rtcMem)
+    );
     // debug status
     Serial.print(uptime);
     Serial.print(F("ms,"));
@@ -370,6 +384,7 @@ void addChat(
 }
 
 void doBackup() {
+  rtcStore rtcMem;
   rtcMem.check = 0xDE49;
   if (chatData.length()<ESP_RTCMEM){
     chatData.toCharArray(
@@ -385,6 +400,55 @@ void doBackup() {
     ESP_RTCADR,&rtcMem,sizeof(rtcMem)
   );
   yield();
+}
+
+/* --- http page --- */
+
+uint32_t httpTimeStart;
+
+void doHttpStreamBegin() {
+  httpTimeStart = millis();
+  httpServer.sendHeader(
+    F("Connection"), F("close")
+  );
+  httpServer.setContentLength(
+    CONTENT_LENGTH_UNKNOWN
+  );
+  httpServer.send(
+    200,F("text/html"),F("")
+  );
+  yield();
+}
+
+void doHttpStreamEnd() {
+  httpServer.sendContent(F(""));
+  while (
+    httpServer.client().available()) {
+    httpServer.client().read();
+    yield();
+    if (millis()-httpTimeStart>500) {
+      break;
+    }
+  }
+  yield();
+  httpServer.client().stop();
+  requests++;
+  yield();
+}
+
+void doHtmlPageHeader() {
+  httpServer.sendContent(
+    F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' />"));
+}
+
+void doHtmlPageBody() {
+  httpServer.sendContent(
+    F("</head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF>"));
+}
+
+void doHtmlPageFooter() {
+  httpServer.sendContent(
+    F("</body></html>"));
 }
 
 /* --- http handler --- */
@@ -415,48 +479,14 @@ void onHttpChat() {
   httpServer.sendHeader(
     F("Refresh"), F("8")
   );
-  /* -- bugfix garbage collection -- */
-  uint32_t timestart = millis();
-  uint16_t timeout = 500;
-  httpServer.sendHeader(
-    F("Connection"), F("close")
-  );
-  httpServer.setContentLength(
-    CONTENT_LENGTH_UNKNOWN
-  );
-  httpServer.send(
-    200,F("text/html"),F("")
-  );
+  doHttpStreamBegin();
+  doHtmlPageHeader();
+  doHtmlPageBody();
   httpServer.sendContent(
-    F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>WiFi Chat</h1><hr><a href=/chatf>neue Nachricht</a><hr><br>"));
+    F("<h1>WiFi Chat</h1><hr><a href=/chatf>neue Nachricht</a><hr><br>"));
   httpServer.sendContent(getChat());
-  httpServer.sendContent(
-    F("</body></html>"));
-  yield();
-  // close connection
-  httpServer.sendContent(F(""));
-  while (
-    httpServer.client().available()) {
-    httpServer.client().read();
-    yield();
-    if (millis()-timestart>timeout) {
-      break;
-    }
-  }
-  yield();
-  httpServer.client().stop();
-  /* -- dynamic html with string -- *
-  String html="";
-  html+=F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>WiFi Chat</h1><hr><a href=/chatf>neue Nachricht</a><hr><br>");
-  html+=getChat();
-  html+=F("</body></html>");
-  httpServer.send(
-    200, F("text/html"),html
-  );
-  html="";
-  * -- */
-  requests++;
-  yield();
+  doHtmlPageFooter();
+  doHttpStreamEnd();
 }
 
 void onHttpChatFrm() {
@@ -509,8 +539,12 @@ void onHttpChatAdd() {
 }
 
 void onHttpCli() {
+  rtcStore rtcMem;
+  system_rtc_mem_read(
+    ESP_RTCADR, &rtcMem, sizeof(rtcMem)
+  );
   String text= F(
-    "Version: 20221009-0116\n"
+    "Version: 20221009-2040\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
