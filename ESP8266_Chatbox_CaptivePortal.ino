@@ -455,10 +455,12 @@ void addChat(
   chatMsg[0].node[0]=apMAC[apMAL-2];
   chatMsg[0].node[1]=apMAC[apMAL-1];
   // newest messages of this node
-  chatMsg[0].age = 0;
-  chatMsg[0].age--;
+  chatMsg[0].age = 16777215;
   for (int i=0;i<CHAT_MARY;i++) {
-    if (chatMsg[0].node==chatMsg[i].node
+    if (chatMsg[0].node[0]==
+          chatMsg[i].node[0]
+     && chatMsg[0].node[1]==
+          chatMsg[i].node[1]
      && chatMsg[0].age>chatMsg[i].age){
      chatMsg[0].age = chatMsg[i].age;    
     }
@@ -466,11 +468,17 @@ void addChat(
   // next id for this node
   chatMsg[0].id = 0;
   for (int i=0;i<CHAT_MARY;i++) {
-    if (chatMsg[0].node==chatMsg[i].node
+    if (chatMsg[0].node[0]==
+          chatMsg[i].node[0]
+     && chatMsg[0].node[1]==
+          chatMsg[i].node[1]
      && chatMsg[0].age==chatMsg[i].age
      && chatMsg[0].id<chatMsg[i].id){
      chatMsg[0].id = chatMsg[i].id;    
     }
+  }
+  if (chatMsg[0].id >= 1023) {
+    chatMsg[0].id=0;
   }
   chatMsg[0].id++;
   chatMsg[0].age = 0;
@@ -687,7 +695,7 @@ void onHttpCli() {
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
   );
   String text= F(
-    "Version: 20221010-1513\n"
+    "Version: 20221010-1619\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
