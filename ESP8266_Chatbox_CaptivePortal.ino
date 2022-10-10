@@ -11,7 +11,7 @@
 // max client auto disconnect
 // serial debug state
 // reboot on out of memory
-// reboot use rtc memory for chat
+// reboot use rtc memory for backup
 // OTA update for ArduinoDroid
 // OTA password protect by cli
 // admin cli for status, ota, restart
@@ -37,14 +37,15 @@ extern "C" {
 #define AP_CHANNEL  13   // 1..13
 #define AP_MAXCON   8    // 1..8 conns
 #define AP_MAXTOUT  15   // 1..25 sec
-#define AP_CHATMEM  2048 // buffer esp
 #define ESP_OUTMEM  4096 // autoreboot
 #define ESP_RTCADR  65   // offset
-#define ESP_RTCMEM  443  // buffer rtc
-#define LED_OFF     0
-#define LED_ON      1
-#define CHAT_MLEN   56    // msg length
-#define CHAT_MARY   1     // msg array
+#define LED_OFF     0    // led on
+#define LED_ON      1    // led off
+#define CHAT_MLEN   56   // msg length
+#define CHAT_MARY   64   // msg array
+#define CHAT_MRTC   6    // rtc array
+#define CTYPE_HTML  1    // content html
+#define CTYPE_TEXT  2    // content text
 
 const char* apName = "Chatbox-";
 const char* apPass = "";
@@ -60,27 +61,24 @@ String apSSID="";
 String urlHome="";
 String urlChatRefresh="4,url=";
 
+// 64B/message (static ~ nicht DRAM)
+typedef struct {
+  uint8_t  node[2]; // mac address node
+  uint16_t id:10;   // message id
+  uint8_t  mlen:6;  // length message
+  uint8_t  slen:4;  // length sender
+  uint8_t  rlen:4;  // length receiver
+  uint32_t age:24;  // second age
+  char     data[CHAT_MLEN]; // buffer
+} chatMsgT;
+static chatMsgT chatMsg[CHAT_MARY]={0};
+
 // use rtc memory as backup
 typedef struct { 
   uint32_t check;
-  char chat[ESP_RTCMEM];
-} rtcStore;
-/* rtcStore rtcMem; */
-
-// V1: use DRAM for buffer
-String chatData="Admin~WEB: Welcome\n";
-
-// V2: 64B/message (static ~ nicht DRAM)
-typedef struct {
-  uint16_t node;     // mac address node
-  uint16_t id:10;    // sequence message
-  uint8_t  mlen:6;   // length message
-  uint8_t  slen:4;   // length sender
-  uint8_t  rlen:4;   // length receiver
-  uint32_t age:24;   // 250ms slots
-  char     data[CHAT_MLEN]; // buffer
-} chatMsgT;
-static chatMsgT chatMsgB[CHAT_MARY]={0};
+  chatMsgT chatMsg[CHAT_MRTC];
+} rtcMemT;
+/* rtcMemT rtcMem; */
 
 void setup() {
 
@@ -94,14 +92,14 @@ void setup() {
   delay(50);
     
   // RTC restore after reset
-  rtcStore rtcMem;
+  rtcMemT rtcMem;
   system_rtc_mem_read(
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
   );
   if (rtcMem.check == 0xDE49) {
-    chatData=String(rtcMem.chat);
-    chatData=chatData.substring(
-        0,chatData.lastIndexOf("\n"));
+    for (int i=0;i<CHAT_MRTC;i++){
+      chatMsg[i]=rtcMem.chatMsg[i];
+    }
   }
     
   // wifi: don't write setup to flash
@@ -173,6 +171,7 @@ void setup() {
   httpServer.on("/chat",onHttpChat);
   httpServer.on("/chatf",onHttpChatFrm);
   httpServer.on("/chata",onHttpChatAdd);
+  httpServer.on("/chatr",onHttpChatRaw);
   httpServer.on("/cli",onHttpCli);
   httpServer.begin();
 
@@ -216,6 +215,7 @@ void loop() {
     doServer();
     doDisconnect();
     doReboot();
+    updateChatAge();
   }
   yield();
 }
@@ -326,7 +326,7 @@ uint8_t requests=0;
 void doDebug(){
   if (uptime%1009==0) {
     // rtc backup
-    rtcStore rtcMem;
+    rtcMemT rtcMem;
     system_rtc_mem_read(
       ESP_RTCADR,&rtcMem,sizeof(rtcMem)
     );
@@ -353,48 +353,164 @@ void doDebug(){
 
 /* --- chat data --- */
 
-String getChat() {
-  return chatData;
+String getChat(byte ctype,byte send) {
+  String data="",temp,ms="",mr="",mb="";
+  uint8_t count=0;
+  uint8_t apMAL = WL_MAC_ADDR_LENGTH;
+  uint8_t apMAC[apMAL];
+  // node mac
+  WiFi.softAPmacAddress(apMAC);
+  if (ctype==CTYPE_TEXT){
+    data += "\nN"+String(
+        apMAC[apMAL-2]*256+
+        apMAC[apMAL-1]);
+  }
+  // count messages
+  for (uint8_t i=0;i<CHAT_MARY;i++) {
+    if (chatMsg[i].data[0]!=0) {
+      count++;
+    }
+  }
+  if (ctype==CTYPE_TEXT){
+    data += "\nC"+String(count);
+  }
+  // messages
+  for (uint8_t i=0;i<CHAT_MARY;i++) {
+    if (chatMsg[i].data[0]!=0) {
+      temp = String(chatMsg[i].data);
+      if (chatMsg[i].slen>0) {
+        ms = temp.\
+          substring(0,chatMsg[i].slen);
+      }
+      if (chatMsg[i].rlen>0) {
+        mr = temp.\
+          substring(chatMsg[i].slen,
+                chatMsg[i].slen+
+                chatMsg[i].rlen);
+      }
+      if (chatMsg[i].mlen>0) {
+        mb = temp.\
+          substring(chatMsg[i].slen+
+                chatMsg[i].rlen,
+                chatMsg[i].slen+
+                chatMsg[i].rlen+
+                chatMsg[i].mlen);
+      }
+      if (ctype==CTYPE_HTML){
+        data += ms;
+        if (chatMsg[i].rlen>0) {
+          data += "@";
+          data += mr;
+        }
+        if (chatMsg[i].slen>0
+         || chatMsg[i].rlen>0) {
+          data += ": ";
+        }
+        data += mb;
+        data += "<br><br>";
+      }
+      if (ctype==CTYPE_TEXT){
+        data += "\nN"+String(
+          chatMsg[i].node[0]*256+
+          chatMsg[i].node[1]);
+        data += "\nI"+String(
+          chatMsg[i].id);
+        data += "\nA"+String(
+          chatMsg[i].age);
+        data += "\nS"+ms;
+        data += "\nR"+mr;
+        data += "\nM"+mb;
+      }
+      ms=""; mr=""; mb="";
+      if (send==1 && data.length()>0) {
+        httpServer.sendContent(data);
+        data="";
+      }
+    }
+  }
+  if (send==1 && data.length()>0) {
+    httpServer.sendContent(data);
+    data="";
+  }
+  return data;
 }
     
 void addChat(
   String ms, 
   String mr,
   String mb) {
-  if (mr.length()>0) {
-    ms+="@"+mr;
-  }
-  if (ms.length()>0) {
-    ms=ms+": ";
-  }
-  if (ms.length()+mb.length()>0) {
-    chatData=ms+mb+"<br><br>\n" \
-            +chatData;
-    if (chatData.length()>AP_CHATMEM) {
-      chatData=chatData.substring(
-        0,AP_CHATMEM);
-      chatData=chatData.substring(
-        0,chatData.lastIndexOf("\n"));
+  // shift item
+  if (chatMsg[0].data[0]!=0) {
+    for (uint8_t i=CHAT_MARY-1;i>0;i--){
+      chatMsg[i] = chatMsg[i-1];
     }
-    doBackup();
+    chatMsg[0] = {0};
   }
+  // add item
+  chatMsg[0] = {0};
+  // node
+  uint8_t apMAL = WL_MAC_ADDR_LENGTH;
+  uint8_t apMAC[apMAL];
+  WiFi.softAPmacAddress(apMAC);
+  chatMsg[0].node[0]=apMAC[apMAL-2];
+  chatMsg[0].node[1]=apMAC[apMAL-1];
+  // newest messages of this node
+  chatMsg[0].age = 0;
+  chatMsg[0].age--;
+  for (int i=0;i<CHAT_MARY;i++) {
+    if (chatMsg[0].node==chatMsg[i].node
+     && chatMsg[0].age>chatMsg[i].age){
+     chatMsg[0].age = chatMsg[i].age;    
+    }
+  }
+  // next id for this node
+  chatMsg[0].id = 0;
+  for (int i=0;i<CHAT_MARY;i++) {
+    if (chatMsg[0].node==chatMsg[i].node
+     && chatMsg[0].age==chatMsg[i].age
+     && chatMsg[0].id<chatMsg[i].id){
+     chatMsg[0].id = chatMsg[i].id;    
+    }
+  }
+  chatMsg[0].id++;
+  chatMsg[0].age = 0;
+  chatMsg[0].slen = ms.length();
+  chatMsg[0].rlen = mr.length();
+  chatMsg[0].mlen = mb.length();
+  String data=ms+mr+mb;
+  data=data.substring(0,CHAT_MLEN);
+  data.toCharArray(
+    chatMsg[0].data,data.length()+1
+  );
+  data="";
   ms="";
   mr="";
   mb="";
+  doBackup();
+}
+
+uint32_t updateLast = 0;
+
+void updateChatAge() {
+  uint32_t periode=millis()-updateLast;
+  if (periode>=1000) {
+    periode -= 1000; // adjust 1000ms
+    updateLast = millis()+periode;
+    for (int i=0;i<CHAT_MARY;i++) {
+      if (chatMsg[i].data[0]!=0
+       && chatMsg[i].age<16777214) {
+         chatMsg[i].age++;
+      }
+    }
+  }
+  yield();
 }
 
 void doBackup() {
-  rtcStore rtcMem;
+  rtcMemT rtcMem = {0};
   rtcMem.check = 0xDE49;
-  if (chatData.length()<ESP_RTCMEM){
-    chatData.toCharArray(
-      rtcMem.chat,chatData.length()+1
-    );
-  } else {
-    chatData.toCharArray(
-      rtcMem.chat,ESP_RTCMEM-1
-    );
-    rtcMem.chat[ESP_RTCMEM]=0;
+  for (int i=0;i<CHAT_MRTC;i++){
+    rtcMem.chatMsg[i]=chatMsg[i];
   }
   system_rtc_mem_write(
     ESP_RTCADR,&rtcMem,sizeof(rtcMem)
@@ -406,7 +522,7 @@ void doBackup() {
 
 uint32_t httpTimeStart;
 
-void doHttpStreamBegin() {
+void doHttpStreamBegin(byte ctype) {
   httpTimeStart = millis();
   httpServer.sendHeader(
     F("Connection"), F("close")
@@ -414,9 +530,18 @@ void doHttpStreamBegin() {
   httpServer.setContentLength(
     CONTENT_LENGTH_UNKNOWN
   );
-  httpServer.send(
-    200,F("text/html"),F("")
-  );
+  switch(ctype){
+    case CTYPE_HTML:
+      httpServer.send(
+        200,F("text/html"),F("")
+      );
+      break;
+    case CTYPE_TEXT:
+      httpServer.send(
+        200,F("text/plain"),F("")
+      );
+      break;
+  }
   yield();
 }
 
@@ -468,7 +593,7 @@ void onHttpToHome() {
 void onHttpHome() {
   // tiny static landing page
   httpServer.send(
-    200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>WiFi Chat</h1><hr><br>Dieser Hotspot bietet einen lokalen Chat. Die Nachrichten werden nicht dauerhaft gespeichert. Bitte alle rechtlichen Regeln einhalten und keine Beleidigungen!<br><br><a href=/chat>OK - akzeptiert</a></body></html>")
+    200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>Chatbox</h1><hr><br>Welcome to the Chatbox hotspot. You can communicate anonymously with your neighbors through this access point. Please behave decently!<br><br>Willkommen beim WiFi Chat. Du kannst &uuml;ber den Hotspot anonym mit deinen Nachbarn kommunizieren. Bitte verhalte dich zivilisiert!<br><br><a href=/chat>OK - accept (akzeptiert)</a></body></html>")
   );
   requests++;
   yield();
@@ -479,19 +604,19 @@ void onHttpChat() {
   httpServer.sendHeader(
     F("Refresh"), F("8")
   );
-  doHttpStreamBegin();
+  doHttpStreamBegin(CTYPE_HTML);
   doHtmlPageHeader();
   doHtmlPageBody();
   httpServer.sendContent(
-    F("<h1>WiFi Chat</h1><hr><a href=/chatf>neue Nachricht</a><hr><br>"));
-  httpServer.sendContent(getChat());
+    F("<h1>Chatbox</h1><hr><a href=/chatf>create (erstellen)</a><hr><br>"));
+  getChat(CTYPE_HTML,1);
   doHtmlPageFooter();
   doHttpStreamEnd();
 }
 
 void onHttpChatFrm() {
   httpServer.send(
-    200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /><script>function onInp(){var df=document.forms.mf,cl=56-(df.ms.value.length+df.mr.value.length+df.mb.value.length); document.getElementById('mn').innerText=cl;}</script></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>WiFi Chat</h1><hr><a href=/chat>abbrechen</a><hr><br><form name=mf action=/chata method=POST>Absender:<br><input type=text name=ms maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Empf&auml;nger:<br><input type=text name=mr maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Nachricht:<br><textarea name=mb rows=3 cols=22 maxlength=56 onChange=onInp() onkeyup=onInp()></textarea><br><br><input type=submit value=senden> <span id=mn></span></form></body></html>")
+    200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /><script>function onInp(){var df=document.forms.mf,cl=56-(df.ms.value.length+df.mr.value.length+df.mb.value.length); document.getElementById('mn').innerText=cl;}</script></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>Chatbox</h1><hr><a href=/chat>cancle (abbrechen)</a><hr><br><form name=mf action=/chata method=POST>Sender (Absender):<br><input type=text name=ms maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Receiver (Empf&auml;nger):<br><input type=text name=mr maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Message (Nachricht):<br><textarea name=mb rows=3 cols=22 maxlength=56 onChange=onInp() onkeyup=onInp()></textarea><br><br><input type=submit value=senden> <span id=mn></span></form></body></html>")
   );
   requests++;
   yield();
@@ -512,16 +637,24 @@ void onHttpChatAdd() {
     F("Refresh"), urlChatRefresh
   );
   String ms = maskHttpArg("ms");
-  ms.replace("~","-");
-  ms = ms.substring(0,16);
+  if (ms.length()>0) {
+    ms.replace("~","-");
+    ms = ms.substring(0,16);
+  }
   String mr = maskHttpArg("mr");
-  mr = mr.substring(0,16);
+  if (mr.length()>0) {
+    mr = mr.substring(0,16);
+  }
   String mb = maskHttpArg("mb");
   mb=mb.substring(
     0,56-ms.length()-mr.length());
-  addChat(ms,mr,mb);
+  if ((ms.length()+
+       mr.length()+
+       mb.length())>0) {
+    addChat(ms,mr,mb);
+  }
   String html="";
-  html+=F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>WiFi Chat</h1><hr><a href=/chat>weiter</a><hr><br>");
+  html+=F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>Chatbox</h1><hr><a href=/chat>next (weiter)</a><hr><br>");
   html+=ms;
   if (mr.length()>0) {
     html+=F("@");
@@ -538,13 +671,23 @@ void onHttpChatAdd() {
   yield();
 }
 
+void onHttpChatRaw() {
+  doHttpStreamBegin(CTYPE_TEXT);
+  httpServer.sendContent(
+    F("V1\nT"));
+  httpServer.sendContent(
+    String(millis()));
+  getChat(CTYPE_TEXT,1);
+  doHttpStreamEnd();
+}
+
 void onHttpCli() {
-  rtcStore rtcMem;
+  rtcMemT rtcMem;
   system_rtc_mem_read(
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
   );
   String text= F(
-    "Version: 20221009-2040\n"
+    "Version: 20221010-1513\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
