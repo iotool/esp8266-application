@@ -17,6 +17,7 @@
 // admin cli for status, ota, restart
 // dynamic html without memory issue
 // validate input size
+// mesh net
 
 // overwrite esp-sdk (wifi_set_country)
 extern "C" {
@@ -29,12 +30,15 @@ extern "C" {
 #include <Arduino.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <StreamString.h>
 
 /* --- configuration --- */
 
 #define AP_PHYMOD   WIFI_PHY_MODE_11B
 #define AP_POWER    20   // 0..20 Lo/Hi
-#define AP_CHANNEL  13   // 1..13
+#define AP_CHANNEL  13   // 1..13 (13)
 #define AP_MAXCON   8    // 1..8 conns
 #define AP_MAXTOUT  15   // 1..25 sec
 #define ESP_OUTMEM  4096 // autoreboot
@@ -46,10 +50,22 @@ extern "C" {
 #define CHAT_MRTC   6    // rtc array
 #define CTYPE_HTML  1    // content html
 #define CTYPE_TEXT  2    // content text
+#define MESH_INIT   0    // mode
+#define MESH_SCAN   10   // mode
+#define MESH_SCANE  11   // mode
+#define MESH_JOIN   20   // mode
+#define MESH_JOINE  21   // mode  
+#define MESH_DINIT  5000 // delay loop
+#define MESH_TSCAN  500  // timeout
+#define MESH_DJOIN  2500 // delay next
+#define MESH_TJOIN  12000// timeout
+#define MESH_DNOOP  100  // delay noop
+#define MESH_THTTP  750  // timeout
 
-const char* apName = "Chatbox-";
-const char* apPass = "";
-const char* apHost = "web";
+const char* apName = "Chatbox-"; // net
+const char* apPass = "";         // pkey
+const char* apAuth = "Chat.B0x"; // pkey
+const char* apHost = "web";      // host
 
 /* --- variables --- */
 
@@ -198,7 +214,8 @@ struct {
   uint8_t beginOtaServer:1;
   uint8_t disconnectClients:1;
   uint8_t builtinLedMode:2;
-  uint8_t reserve:2;
+  uint8_t meshMode:2;
+  uint8_t reserve:4;
 } flag = {0,0,0,0,0,0};
 
 // time
@@ -215,7 +232,8 @@ void loop() {
     doServer();
     doDisconnect();
     doReboot();
-    updateChatAge();
+    doUpdateChatAge();
+    doMesh();
   }
   yield();
 }
@@ -444,7 +462,6 @@ void addChat(
     for (uint8_t i=CHAT_MARY-1;i>0;i--){
       chatMsg[i] = chatMsg[i-1];
     }
-    chatMsg[0] = {0};
   }
   // add item
   chatMsg[0] = {0};
@@ -499,7 +516,7 @@ void addChat(
 
 uint32_t updateLast = 0;
 
-void updateChatAge() {
+void doUpdateChatAge() {
   uint32_t periode=millis()-updateLast;
   if (periode>=1000) {
     periode -= 1000; // adjust 1000ms
@@ -509,6 +526,7 @@ void updateChatAge() {
        && chatMsg[i].age<16777214) {
          chatMsg[i].age++;
       }
+      yield();
     }
   }
   yield();
@@ -526,6 +544,298 @@ void doBackup() {
   yield();
 }
 
+/* --- mesh network --- */
+
+struct {
+  uint32_t timerScan;
+  uint32_t timerJoin;
+  uint32_t timer1Delay;
+  uint32_t timer2Ready;
+  uint8_t  mode;
+  uint8_t  wifi;
+} mesh = {0};
+
+void doMesh() {
+  // scan net, connect, download, merge
+  uint8_t i;
+  if (mesh.mode == MESH_INIT) {
+    // initiate scan
+    mesh.mode = MESH_SCAN;
+    mesh.timerScan = 0;
+    Serial.println("mesh.init V24");
+  } else 
+  if (mesh.mode == MESH_SCAN
+   && millis()-mesh.timerScan
+        > MESH_DINIT) {
+    // scan start async
+    mesh.mode = MESH_SCANE;
+    mesh.timerScan = millis();
+    WiFi.scanNetworks(true);
+  } else 
+  if (mesh.mode == MESH_SCANE
+   && millis()-mesh.timerScan
+        > MESH_TSCAN) {
+    // scan end
+    mesh.wifi = WiFi.scanComplete();
+    if (mesh.wifi == 0) {
+      // no networks, scan again
+      mesh.mode = MESH_SCAN;
+      mesh.timerScan = millis();
+      WiFi.scanDelete();
+    } else {
+      // found networks, connect
+      mesh.mode = MESH_JOIN;
+      mesh.timerJoin = millis();
+    }
+  } else 
+  if (mesh.mode == MESH_JOIN
+   && millis()-mesh.timerJoin
+        > MESH_DJOIN) {
+    // start connect to wifi
+    i = mesh.wifi-1;
+    if (mesh.wifi==0) {
+      // end of list, scan again
+      mesh.mode = MESH_SCAN;
+      mesh.timerScan = millis();
+      WiFi.scanDelete();
+    } else
+    if (WiFi.channel(i)!=AP_CHANNEL
+    || !String(WiFi.SSID(i).c_str()).\
+         startsWith(apName)) {  
+      // ignore other channel or wifi
+      mesh.mode = MESH_JOIN;
+      mesh.timerJoin = millis();
+      mesh.wifi--;
+    } else {
+      // join same network
+      mesh.mode = MESH_JOINE;
+      mesh.timerJoin = millis();
+      mesh.timer2Ready = millis();
+      mesh.wifi--;
+      if (WiFi.encryptionType(i) ==
+            ENC_TYPE_NONE) {
+        WiFi.begin(WiFi.SSID(i));
+      } else {
+        WiFi.begin(WiFi.SSID(i),apAuth);
+      }
+    }
+  } else 
+  if (mesh.mode == MESH_JOINE
+   && millis()-mesh.timerJoin<MESH_TJOIN
+   && millis()-mesh.timer2Ready
+        > MESH_DNOOP) {
+    // detect connection
+    mesh.timer2Ready = millis();
+    if (WiFi.status()==WL_CONNECTED) {
+      mesh.timerJoin -= MESH_TJOIN;
+    }
+  } else 
+  if (mesh.mode == MESH_JOINE
+   && millis()-mesh.timerJoin
+        > MESH_TJOIN) {
+    // connected or timeout
+    if (WiFi.status()==WL_CONNECTED) {
+      // webserver
+      IPAddress meshIP = IPAddress(
+        WiFi.localIP()[0],
+        WiFi.localIP()[1],
+        WiFi.localIP()[2],
+        1
+      );
+      // url
+      String url = F("http://");
+      url += meshIP.toString();
+      url += F("/chatr");
+      Serial.println(url);
+      // http request
+      WiFiClient wifiClient; 
+      HTTPClient httpClient;      
+      httpClient.begin(
+        wifiClient, 
+        url.c_str()
+      );
+      httpClient.setTimeout(MESH_THTTP);
+      // http response
+      int httpRC = httpClient.GET();
+      yield();
+      if (httpRC>0) {
+        Serial.println("http.ok");
+        StreamString streamHttp;        
+        httpClient.writeToStream(
+          &streamHttp);
+        String line;
+        doMeshResponseBegin();
+        while(streamHttp.available()>0){
+          line = streamHttp.\
+            readStringUntil('\n');
+          yield();
+          doMeshResponseData(line);
+          yield();
+        }
+        doMeshResponseEnd();
+        // Serial.println(
+        //  streamHttp.readString());
+        // Serial.println(
+        //   httpClient.getString());
+      } else {
+        Serial.println("http.error");
+      }
+      httpClient.end();
+      WiFi.disconnect();
+    }
+    if (mesh.wifi == 0) {
+      // end of lisr, scan again
+      mesh.mode = MESH_SCAN;
+      mesh.timerScan = millis();
+      WiFi.scanDelete();
+    } else {
+      // connect next
+      mesh.mode = MESH_JOIN;
+      mesh.timerJoin = millis();
+    }
+  } 
+  yield();
+}
+
+chatMsgT meshMsg;
+String meshMsgData;
+
+void doDebugMeshChat() {
+  String data="",temp,ms="",mr="",mb="";
+  temp = String(meshMsg.data);
+  if (meshMsg.slen>0) {
+    ms = temp.\
+      substring(0,meshMsg.slen);
+  }
+  if (meshMsg.rlen>0) {
+    mr = temp.\
+      substring(meshMsg.slen,
+                meshMsg.slen+
+                meshMsg.rlen);
+  }
+  if (meshMsg.mlen>0) {
+    mb = temp.\
+      substring(meshMsg.slen+
+                meshMsg.rlen,
+                meshMsg.slen+
+                meshMsg.rlen+
+                meshMsg.mlen);
+  }
+  data = "\nN"+String(
+    meshMsg.node[0]*256+
+    meshMsg.node[1]);
+  data += "\nI"+String(
+    meshMsg.id);
+  data += "\nA"+String(
+    meshMsg.age);
+  data += "\nS"+ms;
+  data += "\nR"+mr;
+  data += "\nM"+mb;
+  Serial.println(data);
+}
+
+void doMergeMeshChat() {
+  boolean exists=false;
+  uint8_t position=CHAT_MARY;
+  // search
+  for (int i=0;i<CHAT_MARY;i++) {
+    if (meshMsg.node[0]==
+          chatMsg[i].node[0]
+     && meshMsg.node[1]==
+          chatMsg[i].node[1]
+     && meshMsg.id==chatMsg[i].id
+     && meshMsg.slen==chatMsg[i].slen
+     && meshMsg.rlen==chatMsg[i].rlen
+     && meshMsg.mlen==chatMsg[i].mlen){
+      exists=true;
+    }
+    if (meshMsg.age<chatMsg[i].age) {
+      position=i;
+    }
+    yield();
+  }
+  // empty list
+  if (chatMsg[0].data[0]==0) {
+    position=0;
+  } 
+  // insert
+  if (exists==false 
+   && position<CHAT_MARY) {
+    if (chatMsg[position].data[0]!=0){
+      // shift item
+      for (uint8_t i=CHAT_MARY-1;
+            i>position;i--){
+        chatMsg[i] = chatMsg[i-1];
+        yield();
+      }
+    } 
+    // insert item
+    chatMsg[position]=meshMsg;
+  }
+}
+
+void doMeshResponseBegin() {
+}
+
+void doMeshResponseData(String line) {
+  char lineType;
+  if (line.length()==0) {
+    lineType = 0;
+  } else {
+    lineType = line.charAt(0);
+  }
+  int num;
+  switch(lineType) {
+    case 'N': // node
+      meshMsg = {0};
+      meshMsgData = "";
+      num = line.substring(1).toInt();
+      meshMsg.node[1] = num%256;
+      num -= meshMsg.node[1];
+      num /= 256;
+      meshMsg.node[0] = num%256;
+      break;
+    case 'I': // id
+      num = line.substring(1).toInt();
+      meshMsg.id = num;
+      break;
+    case 'A': // age
+      num = line.substring(1).toInt();
+      meshMsg.age = num;
+      break;
+    case 'S': // sender
+      meshMsg.slen = line.length()-1;
+      if (line.length()>1){
+        meshMsgData+=line.substring(1);
+      }
+      break;
+    case 'R': // receiver
+      meshMsg.rlen = line.length()-1;
+      if (line.length()>1){
+        meshMsgData+=line.substring(1);
+      }
+      break;
+    case 'M': // message
+      meshMsg.mlen = line.length()-1;
+      if (line.length()>1){
+        meshMsgData+=line.substring(1);
+      }
+      meshMsgData.toCharArray(
+        meshMsg.data,
+        meshMsgData.length()+1
+      );
+      meshMsgData="";
+      doMergeMeshChat();
+      // doDebugMeshChat();
+      break;
+  }
+  // Serial.print("line:");
+  // Serial.println(line);
+}
+
+void doMeshResponseEnd() {
+}
+    
 /* --- http page --- */
 
 uint32_t httpTimeStart;
@@ -695,7 +1005,7 @@ void onHttpCli() {
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
   );
   String text= F(
-    "Version: 20221010-1619\n"
+    "Version: 20221011-0511\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
