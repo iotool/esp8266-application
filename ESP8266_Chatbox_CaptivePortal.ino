@@ -19,6 +19,13 @@
 // validate input size
 // mesh network by STA connect to AP
 // workaround age++ jumps
+// 
+// This is a proof-of-concept 
+// to combine hotspot and mesh nodes.
+// All chat data shared between each
+// node of the mesh without a master.
+// You can use this for local chat
+// without internet access or services.
 
 // overwrite esp-sdk (wifi_set_country)
 extern "C" {
@@ -41,7 +48,7 @@ extern "C" {
 #define AP_POWER    20   // 0..20 Lo/Hi
 #define AP_CHANNEL  13   // 1..13 (13)
 #define AP_MAXCON   8    // 1..8 conns
-#define AP_MAXTOUT  15   // 1..25 sec
+#define AP_MAXTOUT  7    // 1..25 sec
 #define ESP_OUTMEM  4096 // autoreboot
 #define ESP_RTCADR  65   // offset
 #define LED_OFF     0    // led on
@@ -70,6 +77,34 @@ const char* apPass = "";         // pkey
 const char* apAuth = "Chat.B0x"; // pkey
 const char* apHost = "web";      // host
 
+// Each mesh node using the same 
+// WiFi channel and hotspot prefix.
+// The mesh is very simple, each node
+// scan all access point at the same
+// channel and connect, if the hotspot
+// using the same prefix.
+// 
+// ESP8266 supports max 8 connections.
+// To provide more users this sketch
+// automatic disconnect all connections
+// after reaching 8 connections.
+// We need the disconnect to provide
+// access to other mesh nodes.
+// 
+// The chat structure has a fix size
+// and the data segment used for sender,
+// receiver and message.
+// To sync the chat over multiple nodes
+// I use the physical address, sequence
+// timestamp/age and length of sender,
+// receiver and message.
+// Older messages will delete by newer.
+// 
+// Using ESP8266 in AP_STA mode will 
+// block the AP durring using as STA.
+// To reduce this negative effect I 
+// limited the mesh syncs.
+
 /* --- variables --- */
 
 DNSServer dnsServer;
@@ -80,7 +115,8 @@ String apSSID="";
 String urlHome="";
 String urlChatRefresh="4,url=";
 
-// message (static ~ not in DRAM)
+// chat structure (static ~ not in DRAM)
+// fixed format aligned to 16B RAM block
 typedef struct {
   uint8_t  node[2]; // mac address node
   uint8_t  id;      // sequence
@@ -92,7 +128,8 @@ typedef struct {
 } chatMsgT;
 static chatMsgT chatMsg[CHAT_MARY]={0};
 
-// use rtc memory as backup
+// rtc memory as backup
+// keep some data after reset
 typedef struct { 
   uint32_t check;
   chatMsgT chatMsg[CHAT_MRTC];
@@ -101,15 +138,18 @@ typedef struct {
 void setup() {
 
   // builtin led
+  // normaly turned off all the time
   pinMode(LED_BUILTIN,OUTPUT);
   digitalWrite(LED_BUILTIN,HIGH);
     
   // serial debug
+  // debug state, memory usage, etc
   Serial.begin(19200);
   Serial.println(F("boot"));
   delay(50);
     
   // RTC restore after reset
+  // use data, if magic DE49 was set
   rtcMemT rtcMem;
   system_rtc_mem_read(
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
@@ -121,9 +161,11 @@ void setup() {
   }
     
   // wifi: don't write setup to flash
+  // increase life time of the mcu
   WiFi.persistent(false); 
     
   // wifi: dynamic SSID by physical MAC
+  // seperare suffix for each mesh node
   uint8_t apMAL = WL_MAC_ADDR_LENGTH;
   uint8_t apMAC[apMAL];
   WiFi.softAPmacAddress(apMAC);
@@ -138,6 +180,7 @@ void setup() {
   apSSID += F(".local)");
 
   // wifi: fast network scan (1 channel)
+  // reduce scan time 2400ms to 150ms
   wifi_country_t apCountry = {
     .cc = "EU",          // country
     .schan = AP_CHANNEL, // start chnl
@@ -147,13 +190,14 @@ void setup() {
   wifi_set_country(&apCountry);
 
   // wifi: cap.portal popup public ip
-  // IPAddress apIP(172,0,0,1);
+  // IPAddress apIP(172,mac,mac,1);
   uint8_t apIP2=apMAC[apMAL-2]%224+32;
   uint8_t apIP3=apMAC[apMAL-1];
   IPAddress apIP(172,apIP2,apIP3,1);
   IPAddress apNetMsk(255,255,255,0);
   
-  // wifi: start access point 
+  // wifi: start access point
+  // call twice to set the channel
   WiFi.mode(WIFI_AP_STA);
   WiFi.setPhyMode(AP_PHYMOD);
   WiFi.setOutputPower(AP_POWER);
@@ -165,6 +209,7 @@ void setup() {
   }
     
   // wifi: increase ap clients
+  // increase from 4 to 8 connections
   struct softap_config apConfig;
   wifi_softap_get_config(&apConfig);
   apConfig.max_connection = AP_MAXCON;
@@ -174,11 +219,13 @@ void setup() {
   dnsServer.start(53, "*", apIP);
 
   // dns: multicast DNS web.local
+  // user friendly promotion url
   if (MDNS.begin(apHost)) {
     MDNS.addService("http","tcp",80);
   }
   
   // http: webserver
+  // map path and handler
   urlHome = F("http://");
   urlHome += WiFi.softAPIP().toString();
   urlChatRefresh += urlHome;
@@ -194,15 +241,17 @@ void setup() {
   httpServer.begin();
 
   // ota: update
+  // update firmware via wifi
   ArduinoOTA.setPort(8266);
   /* ArduinoOTA.setPassword(
-    (const char *)"ChatB0x"
-  ); */
+    (const char *)"ChatB0x"); 
+   * dont work with arduinoDroid */
   ArduinoOTA.onStart([]()
     {Serial.println("OTA Start");});
   ArduinoOTA.onEnd([]()
     {Serial.println("\nOTA End");});
-  // ArduinoOTA.begin();
+  /* ArduinoOTA.begin();
+   * enabled via CLI login */
   
   delay(100);
 }
@@ -210,6 +259,7 @@ void setup() {
 /* --- main --- */
 
 // Flags
+// application state and flags
 struct {
   uint8_t enableCliCommand:1;
   uint8_t enableOtaUpdate:1;
@@ -220,7 +270,8 @@ struct {
   uint8_t reserve:4;
 } flag = {0,0,0,0,0,0};
 
-// time
+// timer
+// handle multiple tasks on single cpu
 uint32_t uptime=0;
 uint32_t uptimeLast=0;
 
@@ -228,7 +279,7 @@ void loop() {
   uptimeLast = uptime;
   uptime = millis();
   if (uptime!=uptimeLast) {
-    // only one per millisecond
+    // once per millisecond
     doLed();
     doDebug();
     doServer();
@@ -241,7 +292,12 @@ void loop() {
 }
 
 void doServer() {
+  // execute different server handlers
+  // dns   domain name
+  // http  webserver
+  // ota   over the air update
   if (uptime%11==0) {
+    // reduce the number of responces
     // 9: 111 Req/s ~  5.4 KB/Req
     // 11: 90 Req/s ~  6.6 KB/Req
     // 13: 76 Req/s ~  7.7 KB/Req
@@ -267,14 +323,15 @@ void doServer() {
 uint8_t disconnectTimer=0;
 
 void doDisconnect() {
-  // disconnect all clients
-  // if max clients connected
+  // disconnect all on max connected
+  // enable other nodes to connect
   if (uptime%107==0) {
-    // max client timer 
+    // wait 7 seconds before disconnect
+    // to ignore short mesh connections
     if (WiFi.softAPgetStationNum()
         == AP_MAXCON) {
       if (disconnectTimer==0) {
-        // start timer 10s
+        // start timer 7s
         disconnectTimer=10*AP_MAXTOUT;
       }
     } else {
@@ -292,6 +349,7 @@ void doDisconnect() {
   }
   if (flag.disconnectClients==1) {
     // disconnect all clients
+    // waiting clients able to connect
     flag.disconnectClients=0;
     WiFi.softAPdisconnect(false);
     WiFi.softAP(
@@ -312,6 +370,7 @@ void doDisconnect() {
 
 void doReboot() {
   // reboot before out of memory freeze
+  // workaround to keep service alive
   if (uptime%103==0) {
     if (system_get_free_heap_size()
         < ESP_OUTMEM) {
@@ -343,7 +402,9 @@ void doLed() {
 
 uint8_t requests=0;
 
-void doDebug(){
+void doDebug() {
+  // debug system state via serial
+  // also provided by CLI via WiFi
   if (uptime%1009==0) {
     // rtc backup
     rtcMemT rtcMem;
@@ -374,6 +435,8 @@ void doDebug(){
 /* --- chat data --- */
 
 String getChat(byte ctype,byte send) {
+  // create chat output for html or text
+  // option direct stream to http client
   String data="",temp,ms="",mr="",mb="";
   uint8_t count=0;
   uint8_t apMAL = WL_MAC_ADDR_LENGTH;
@@ -460,7 +523,10 @@ void addChat(
   String ms, 
   String mr,
   String mb) {
-  // shift item
+  // append a new chat to the buffer
+  // the oldest message will deleted   
+
+  // shift item to get free msg[0]
   if (chatMsg[0].data[0]!=0) {
     for (uint8_t i=CHAT_MARY-1;i>0;i--){
       chatMsg[i] = chatMsg[i-1];
@@ -468,13 +534,13 @@ void addChat(
   }
   // add item
   chatMsg[0] = {0};
-  // node
+  // node mac
   uint8_t apMAL = WL_MAC_ADDR_LENGTH;
   uint8_t apMAC[apMAL];
   WiFi.softAPmacAddress(apMAC);
   chatMsg[0].node[0]=apMAC[apMAL-2];
   chatMsg[0].node[1]=apMAC[apMAL-1];
-  // newest messages of this node
+  // find newest messages of this node
   chatMsg[0].age = CHAT_MAXAGE;
   for (int i=0;i<CHAT_MARY;i++) {
     if (chatMsg[0].node[0]==
@@ -485,7 +551,7 @@ void addChat(
      chatMsg[0].age = chatMsg[i].age;    
     }
   }
-  // next id for this node
+  // find next id for this node
   chatMsg[0].id = 0;
   for (int i=0;i<CHAT_MARY;i++) {
     if (chatMsg[0].node[0]==
@@ -524,7 +590,9 @@ void doUpdateChatAge() {
   // increase the age of each message
   // workaround: uptime mod 1013
   uint32_t periode,age_b,age_1,age_2;
-  if (uptime%1013==0) {  
+  if (uptime%1013==0) {
+    // the is a bug with millis() and
+    // void sometimes called multiple
     periode=millis()-updateLast;
     if (periode >= 1000) {
       periode -= 1000;
@@ -543,6 +611,8 @@ void doUpdateChatAge() {
 }
 
 void doBackup() {
+  // backup data to limited rtc memory
+  // dont use flash or eeprom for chat
   rtcMemT rtcMem = {0};
   rtcMem.check = 0xDE49;
   for (int i=0;i<CHAT_MRTC;i++){
@@ -566,18 +636,19 @@ struct {
 } mesh = {0};
 
 void doMesh() {
+  // async mesh network workflow
   // scan net, connect, download, merge
   uint8_t i;
   if (mesh.mode == MESH_INIT) {
-    // initiate scan
+    // initiate scan after re-boot
     mesh.mode = MESH_SCAN;
     mesh.timerScan = 0;
-    Serial.println("mesh.init V28");
+    Serial.println("mesh.init V33");
   } else 
   if (mesh.mode == MESH_SCAN
    && millis()-mesh.timerScan
         > MESH_DINIT) {
-    // scan start async
+    // scan network start async
     mesh.mode = MESH_SCANE;
     mesh.timerScan = millis();
     WiFi.scanNetworks(true);
@@ -585,7 +656,7 @@ void doMesh() {
   if (mesh.mode == MESH_SCANE
    && millis()-mesh.timerScan
         > MESH_TSCAN) {
-    // scan end
+    // scan network end
     mesh.wifi = WiFi.scanComplete();
     if (mesh.wifi == 0) {
       // no networks, scan again
@@ -617,7 +688,7 @@ void doMesh() {
       mesh.timerJoin = millis();
       mesh.wifi--;
     } else {
-      // join same network
+      // join same mesh network
       mesh.mode = MESH_JOINE;
       mesh.timerJoin = millis();
       mesh.timer2Ready = millis();
@@ -634,7 +705,7 @@ void doMesh() {
    && millis()-mesh.timerJoin<MESH_TJOIN
    && millis()-mesh.timer2Ready
         > MESH_DNOOP) {
-    // detect connection
+    // detect connection before timeout
     mesh.timer2Ready = millis();
     if (WiFi.status()==WL_CONNECTED) {
       mesh.timerJoin -= MESH_TJOIN;
@@ -645,14 +716,14 @@ void doMesh() {
         > MESH_TJOIN) {
     // connected or timeout
     if (WiFi.status()==WL_CONNECTED) {
-      // webserver
+      // webserver mesh node
       IPAddress meshIP = IPAddress(
         WiFi.localIP()[0],
         WiFi.localIP()[1],
         WiFi.localIP()[2],
         1
       );
-      // url
+      // url chat raw data
       String url = F("http://");
       url += meshIP.toString();
       url += F("/chatr");
@@ -670,6 +741,8 @@ void doMesh() {
       yield();
       if (httpRC>0) {
         Serial.println("http.ok");
+        // use streaming interface
+        // to handle line by line
         StreamString streamHttp;        
         httpClient.writeToStream(
           &streamHttp);
@@ -694,7 +767,7 @@ void doMesh() {
       WiFi.disconnect();
     }
     if (mesh.wifi == 0) {
-      // end of lisr, scan again
+      // end of list, scan again
       mesh.mode = MESH_SCAN;
       mesh.timerScan = millis();
       WiFi.scanDelete();
@@ -711,6 +784,7 @@ chatMsgT meshMsg;
 String meshMsgData;
 
 void doDebugMeshChat() {
+  // debug chat structur
   String data="",temp,ms="",mr="",mb="";
   temp = String(meshMsg.data);
   if (meshMsg.slen>0) {
@@ -745,49 +819,60 @@ void doDebugMeshChat() {
 }
 
 void doMergeMeshChat() {
+  // sync between mesh nodes
   boolean exists=false;
   uint8_t position=CHAT_MARY;
-  // search
+  // search message exists / position
   for (int i=0;i<CHAT_MARY;i++) {
     if (meshMsg.node[0]==
           chatMsg[i].node[0]
      && meshMsg.node[1]==
           chatMsg[i].node[1]
+     && meshMsg.data[1]==
+          chatMsg[i].data[1]
      && meshMsg.id==chatMsg[i].id
      && meshMsg.slen==chatMsg[i].slen
      && meshMsg.rlen==chatMsg[i].rlen
      && meshMsg.mlen==chatMsg[i].mlen){
+      // dont store existing messages
       exists=true;
     }
-    if (meshMsg.age<chatMsg[i].age) {
+    if (position==CHAT_MARY
+     && meshMsg.age<=chatMsg[i].age
+     && chatMsg[i].data[0]!=0) {
+      // sort position by age
+      position=i;
+    }
+    if (position==CHAT_MARY
+     && chatMsg[i].data[0]==0) {
+      // use next empty struct
       position=i;
     }
     yield();
   }
-  // empty list
-  if (chatMsg[0].data[0]==0) {
-    position=0;
-  } 
   // insert
   if (exists==false 
    && position<CHAT_MARY) {
     if (chatMsg[position].data[0]!=0){
-      // shift item
+      // shift items to the end
       for (uint8_t i=CHAT_MARY-1;
             i>position;i--){
         chatMsg[i] = chatMsg[i-1];
         yield();
       }
     } 
-    // insert item
+    // insert item ordered by age
     chatMsg[position]=meshMsg;
   }
 }
 
 void doMeshResponseBegin() {
+  // process at the begin of http result
 }
 
 void doMeshResponseData(String line) {
+  // parse each line of http response
+  // the first char contains linetype
   char lineType;
   if (line.length()==0) {
     lineType = 0;
@@ -796,7 +881,7 @@ void doMeshResponseData(String line) {
   }
   int num;
   switch(lineType) {
-    case 'N': // node
+    case 'N': // node = struc begin
       meshMsg = {0};
       meshMsgData = "";
       num = line.substring(1).toInt();
@@ -825,7 +910,7 @@ void doMeshResponseData(String line) {
         meshMsgData+=line.substring(1);
       }
       break;
-    case 'M': // message
+    case 'M': // message / struc end
       meshMsg.mlen = line.length()-1;
       if (line.length()>1){
         meshMsgData+=line.substring(1);
@@ -835,6 +920,7 @@ void doMeshResponseData(String line) {
         meshMsgData.length()+1
       );
       meshMsgData="";
+      // handle the struc
       doMergeMeshChat();
       // doDebugMeshChat();
       break;
@@ -844,6 +930,7 @@ void doMeshResponseData(String line) {
 }
 
 void doMeshResponseEnd() {
+  // process at the end of http result
 }
     
 /* --- http page --- */
@@ -851,6 +938,8 @@ void doMeshResponseEnd() {
 uint32_t httpTimeStart;
 
 void doHttpStreamBegin(byte ctype) {
+  // template http begin / dynamic html
+  // without content-length
   httpTimeStart = millis();
   httpServer.sendHeader(
     F("Connection"), F("close")
@@ -874,6 +963,8 @@ void doHttpStreamBegin(byte ctype) {
 }
 
 void doHttpStreamEnd() {
+  // template http end / dynamic html
+  // read until client disconnect
   httpServer.sendContent(F(""));
   while (
     httpServer.client().available()) {
@@ -890,16 +981,21 @@ void doHttpStreamEnd() {
 }
 
 void doHtmlPageHeader() {
+  // template html / header
+  // zoom-in by meta viewport
   httpServer.sendContent(
     F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' />"));
 }
 
 void doHtmlPageBody() {
+  // template html / body
+  // dark colors to reduce power usage
   httpServer.sendContent(
     F("</head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF>"));
 }
 
 void doHtmlPageFooter() {
+  // template html / footer
   httpServer.sendContent(
     F("</body></html>"));
 }
@@ -907,7 +1003,8 @@ void doHtmlPageFooter() {
 /* --- http handler --- */
 
 void onHttpToHome() {
-  // redirect to home
+  // redirect undefined url to home
+  // static and small size
   httpServer.sendHeader(
     F("Location"), urlHome
   );
@@ -919,7 +1016,8 @@ void onHttpToHome() {
 }
 
 void onHttpHome() {
-  // tiny static landing page
+  // landing page redirected to
+  // static and small size
   httpServer.send(
     200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>Chatbox</h1><hr><br>Welcome to the Chatbox hotspot. You can communicate anonymously with your neighbors through this access point. Please behave decently!<br><br>Willkommen beim WiFi Chat. Du kannst &uuml;ber den Hotspot anonym mit deinen Nachbarn kommunizieren. Bitte verhalte dich zivilisiert!<br><br><a href=/chat>OK - accept (akzeptiert)</a></body></html>")
   );
@@ -929,6 +1027,7 @@ void onHttpHome() {
 
 void onHttpChat() {
   // chat messages with autorefresh
+  // 8sec interval to reduce requests 
   httpServer.sendHeader(
     F("Refresh"), F("8")
   );
@@ -943,6 +1042,8 @@ void onHttpChat() {
 }
 
 void onHttpChatFrm() {
+  // create new char form
+  // number of chars by javascript
 doHttpStreamBegin(CTYPE_HTML);
   doHtmlPageHeader();
   httpServer.sendContent(
@@ -960,6 +1061,8 @@ doHttpStreamBegin(CTYPE_HTML);
 }
 
 String maskHttpArg(String id) {
+  // get CGI request parameter
+  // disable line feed and html tags
   String prm = httpServer.arg(id);
   prm.replace("<","&lt;");
   prm.replace(">","&gt;");
@@ -970,6 +1073,8 @@ String maskHttpArg(String id) {
 }
 
 void onHttpChatAdd() {
+  // handle new chat post request
+  // autoredirect after 4 seconds
   httpServer.sendHeader(
     F("Refresh"), urlChatRefresh
   );
@@ -984,7 +1089,8 @@ void onHttpChatAdd() {
   }
   String mb = maskHttpArg("mb");
   mb=mb.substring(
-    0,56-ms.length()-mr.length());
+    0,
+    CHAT_MLEN-ms.length()-mr.length());
   if ((ms.length()+
        mr.length()+
        mb.length())>0) {
@@ -1009,22 +1115,29 @@ void onHttpChatAdd() {
 }
 
 void onHttpChatRaw() {
+  // raw chat messages for mesh nodes
+  // format is linetype with data
   doHttpStreamBegin(CTYPE_TEXT);
   httpServer.sendContent(
     F("V1\nT"));
   httpServer.sendContent(
     String(millis()));
   getChat(CTYPE_TEXT,1);
+  httpServer.sendContent(
+    F("\nX\n"));
   doHttpStreamEnd();
 }
 
 void onHttpCli() {
+  // admin command-line-interface
+  // and debug information
   rtcMemT rtcMem;
   system_rtc_mem_read(
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
   );
+  // readme
   String text= F(
-    "Version: 20221011-1203\n"
+    "Version: 20221011-1552\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
@@ -1043,6 +1156,7 @@ void onHttpCli() {
     "\n"
     "ESP-Status\n"
   );
+  // debug
   text+="\nUptime:"+String(uptime);
   text+="\nClients:"+String(
     WiFi.softAPgetStationNum());
@@ -1059,6 +1173,7 @@ void onHttpCli() {
       200,F("text/plain"),text
   );
   text="";
+  // cli
   String cmd=httpServer.arg("cmd");
   if (cmd == F("login-password")) {
     flag.enableCliCommand=1;
