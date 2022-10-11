@@ -17,7 +17,8 @@
 // admin cli for status, ota, restart
 // dynamic html without memory issue
 // validate input size
-// mesh net
+// mesh network by STA connect to AP
+// workaround age++ jumps
 
 // overwrite esp-sdk (wifi_set_country)
 extern "C" {
@@ -45,9 +46,11 @@ extern "C" {
 #define ESP_RTCADR  65   // offset
 #define LED_OFF     0    // led on
 #define LED_ON      1    // led off
-#define CHAT_MLEN   56   // msg length
+#define CHAT_MLEN   71   // msg length
 #define CHAT_MARY   64   // msg array
-#define CHAT_MRTC   6    // rtc array
+#define CHAT_MRTC   5    // rtc array
+#define CHAT_MAXID  0xFF // limit
+#define CHAT_MAXAGE 0xFFFFFFF  // limit
 #define CTYPE_HTML  1    // content html
 #define CTYPE_TEXT  2    // content text
 #define MESH_INIT   0    // mode
@@ -77,14 +80,14 @@ String apSSID="";
 String urlHome="";
 String urlChatRefresh="4,url=";
 
-// 64B/message (static ~ nicht DRAM)
+// message (static ~ not in DRAM)
 typedef struct {
   uint8_t  node[2]; // mac address node
-  uint16_t id:10;   // message id
-  uint8_t  mlen:6;  // length message
+  uint8_t  id;      // sequence
+  uint8_t  mlen;    // length message
   uint8_t  slen:4;  // length sender
   uint8_t  rlen:4;  // length receiver
-  uint32_t age:24;  // second age
+  uint32_t age;     // second age
   char     data[CHAT_MLEN]; // buffer
 } chatMsgT;
 static chatMsgT chatMsg[CHAT_MARY]={0};
@@ -94,7 +97,6 @@ typedef struct {
   uint32_t check;
   chatMsgT chatMsg[CHAT_MRTC];
 } rtcMemT;
-/* rtcMemT rtcMem; */
 
 void setup() {
 
@@ -223,8 +225,8 @@ uint32_t uptime=0;
 uint32_t uptimeLast=0;
 
 void loop() {
-  uptimeLast=uptime;
-  uptime=millis();
+  uptimeLast = uptime;
+  uptime = millis();
   if (uptime!=uptimeLast) {
     // only one per millisecond
     doLed();
@@ -232,8 +234,8 @@ void loop() {
     doServer();
     doDisconnect();
     doReboot();
-    doUpdateChatAge();
     doMesh();
+    doUpdateChatAge();
   }
   yield();
 }
@@ -386,7 +388,8 @@ String getChat(byte ctype,byte send) {
   // count messages
   for (uint8_t i=0;i<CHAT_MARY;i++) {
     if (chatMsg[i].data[0]!=0) {
-      count++;
+      // count++;
+      count = count+1;
     }
   }
   if (ctype==CTYPE_TEXT){
@@ -472,7 +475,7 @@ void addChat(
   chatMsg[0].node[0]=apMAC[apMAL-2];
   chatMsg[0].node[1]=apMAC[apMAL-1];
   // newest messages of this node
-  chatMsg[0].age = 16777215;
+  chatMsg[0].age = CHAT_MAXAGE;
   for (int i=0;i<CHAT_MARY;i++) {
     if (chatMsg[0].node[0]==
           chatMsg[i].node[0]
@@ -494,10 +497,11 @@ void addChat(
      chatMsg[0].id = chatMsg[i].id;    
     }
   }
-  if (chatMsg[0].id >= 1023) {
+  if (chatMsg[0].id >= CHAT_MAXID) {
     chatMsg[0].id=0;
   }
-  chatMsg[0].id++;
+  // chatMsg[0].id++;
+  chatMsg[0].id = chatMsg[0].id+1;
   chatMsg[0].age = 0;
   chatMsg[0].slen = ms.length();
   chatMsg[0].rlen = mr.length();
@@ -517,19 +521,25 @@ void addChat(
 uint32_t updateLast = 0;
 
 void doUpdateChatAge() {
-  uint32_t periode=millis()-updateLast;
-  if (periode>=1000) {
-    periode -= 1000; // adjust 1000ms
-    updateLast = millis()+periode;
-    for (int i=0;i<CHAT_MARY;i++) {
-      if (chatMsg[i].data[0]!=0
-       && chatMsg[i].age<16777214) {
-         chatMsg[i].age++;
+  // increase the age of each message
+  // workaround: uptime mod 1013
+  uint32_t periode,age_b,age_1,age_2;
+  if (uptime%1013==0) {  
+    periode=millis()-updateLast;
+    if (periode >= 1000) {
+      periode -= 1000;
+      updateLast = millis()+periode;
+      for (int i=0;i<CHAT_MARY;i++) {
+        if (chatMsg[i].data[0]!=0 &&
+          chatMsg[i].age<CHAT_MAXAGE-1){
+          // bug: chatMsg[i].age++
+          chatMsg[i].age =
+            chatMsg[i].age+1;
+        }
+        yield();
       }
-      yield();
     }
   }
-  yield();
 }
 
 void doBackup() {
@@ -562,7 +572,7 @@ void doMesh() {
     // initiate scan
     mesh.mode = MESH_SCAN;
     mesh.timerScan = 0;
-    Serial.println("mesh.init V24");
+    Serial.println("mesh.init V28");
   } else 
   if (mesh.mode == MESH_SCAN
    && millis()-mesh.timerScan
@@ -933,11 +943,20 @@ void onHttpChat() {
 }
 
 void onHttpChatFrm() {
-  httpServer.send(
-    200, F("text/html"), F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /><script>function onInp(){var df=document.forms.mf,cl=56-(df.ms.value.length+df.mr.value.length+df.mb.value.length); document.getElementById('mn').innerText=cl;}</script></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>Chatbox</h1><hr><a href=/chat>cancle (abbrechen)</a><hr><br><form name=mf action=/chata method=POST>Sender (Absender):<br><input type=text name=ms maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Receiver (Empf&auml;nger):<br><input type=text name=mr maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Message (Nachricht):<br><textarea name=mb rows=3 cols=22 maxlength=56 onChange=onInp() onkeyup=onInp()></textarea><br><br><input type=submit value=senden> <span id=mn></span></form></body></html>")
-  );
-  requests++;
-  yield();
+doHttpStreamBegin(CTYPE_HTML);
+  doHtmlPageHeader();
+  httpServer.sendContent(
+    F("<script>function onInp(){var df=document.forms.mf,cl="));
+  httpServer.sendContent(String(CHAT_MLEN));
+  httpServer.sendContent(
+    F("-(df.ms.value.length+df.mr.value.length+df.mb.value.length); document.getElementById('mn').innerText=cl;}</script>")); 
+  doHtmlPageBody();
+  httpServer.sendContent(
+    F("<h1>Chatbox</h1><hr><a href=/chat>cancle (abbrechen)</a><hr><br><form name=mf action=/chata method=POST>Sender (Absender):<br><input type=text name=ms maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Receiver (Empf&auml;nger):<br><input type=text name=mr maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Message (Nachricht):<br><textarea name=mb rows=3 cols=22 maxlength=")); httpServer.sendContent(String(CHAT_MLEN));
+  httpServer.sendContent(
+    F(" onChange=onInp() onkeyup=onInp()></textarea><br><br><input type=submit value=senden> <span id=mn></span></form>"));
+  doHtmlPageFooter();
+  doHttpStreamEnd();
 }
 
 String maskHttpArg(String id) {
@@ -1005,7 +1024,7 @@ void onHttpCli() {
     ESP_RTCADR, &rtcMem, sizeof(rtcMem)
   );
   String text= F(
-    "Version: 20221011-0511\n"
+    "Version: 20221011-1203\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
