@@ -19,6 +19,7 @@
 // validate input size
 // mesh network by STA connect to AP
 // workaround age++ jumps
+// editable info page
 // 
 // This is a proof-of-concept 
 // to combine hotspot and mesh nodes.
@@ -41,10 +42,11 @@ extern "C" {
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 #include <StreamString.h>
+#include <EEPROM.h>
 
 /* --- configuration --- */
 
-#define AP_PHYMOD   WIFI_PHY_MODE_11B
+#define AP_PHYMOD   WIFI_PHY_MODE_11N
 #define AP_POWER    20   // 0..20 Lo/Hi
 #define AP_CHANNEL  13   // 1..13 (13)
 #define AP_MAXCON   8    // 1..8 conns
@@ -58,6 +60,7 @@ extern "C" {
 #define CHAT_MRTC   5    // rtc array
 #define CHAT_MAXID  0xFF // limit
 #define CHAT_MAXAGE 0xFFFFFFF  // limit
+#define INFO_MLEN   508  // txt length
 #define CTYPE_HTML  1    // content html
 #define CTYPE_TEXT  2    // content text
 #define MESH_INIT   0    // mode
@@ -74,8 +77,9 @@ extern "C" {
 
 const char* apName = "Chatbox-"; // net
 const char* apPass = "";         // pkey
-const char* apAuth = "Chat.B0x"; // pkey
+const char* apAuth = "Chat!b0x"; // pkey
 const char* apHost = "web";      // host
+const char* cliPwd = "Chat.b0x"; // adm
 
 // Each mesh node using the same 
 // WiFi channel and hotspot prefix.
@@ -114,6 +118,7 @@ ESP8266WebServer httpServer(80);
 String apSSID="";
 String urlHome="";
 String urlChatRefresh="4,url=";
+String urlInfoRefresh="4,url=";
 
 // chat structure (static ~ not in DRAM)
 // fixed format aligned to 16B RAM block
@@ -135,18 +140,19 @@ typedef struct {
   chatMsgT chatMsg[CHAT_MRTC];
 } rtcMemT;
 
+// eeprom memory as infopage
+// keep data after power off
+typedef struct { 
+  uint32_t check;
+  char info[INFO_MLEN];
+} eepromMemT;
+
 void setup() {
 
   // builtin led
   // normaly turned off all the time
   pinMode(LED_BUILTIN,OUTPUT);
   digitalWrite(LED_BUILTIN,HIGH);
-    
-  // serial debug
-  // debug state, memory usage, etc
-  Serial.begin(19200);
-  Serial.println(F("boot"));
-  delay(50);
     
   // RTC restore after reset
   // use data, if magic DE49 was set
@@ -158,8 +164,16 @@ void setup() {
     for (int i=0;i<CHAT_MRTC;i++){
       chatMsg[i]=rtcMem.chatMsg[i];
     }
+  } else {
+    digitalWrite(LED_BUILTIN,LOW);
   }
-    
+ 
+  // serial debug
+  // debug state, memory usage, etc
+  Serial.begin(19200);
+  Serial.println(F("boot"));
+  delay(50);
+
   // wifi: don't write setup to flash
   // increase life time of the mcu
   WiFi.persistent(false); 
@@ -229,14 +243,19 @@ void setup() {
   urlHome = F("http://");
   urlHome += WiFi.softAPIP().toString();
   urlChatRefresh += urlHome;
+  urlInfoRefresh += urlHome;
   urlHome += F("/home");
   urlChatRefresh += F("/chat");
+  urlInfoRefresh += F("/info");
   httpServer.onNotFound(onHttpToHome);
   httpServer.on("/home",onHttpHome);
   httpServer.on("/chat",onHttpChat);
   httpServer.on("/chatf",onHttpChatFrm);
   httpServer.on("/chata",onHttpChatAdd);
   httpServer.on("/chatr",onHttpChatRaw);
+  httpServer.on("/info",onHttpInfo);
+  httpServer.on("/infof",onHttpInfoFrm);
+  httpServer.on("/infos",onHttpInfoSet);
   httpServer.on("/cli",onHttpCli);
   httpServer.begin();
 
@@ -254,6 +273,7 @@ void setup() {
    * enabled via CLI login */
   
   delay(100);
+  digitalWrite(LED_BUILTIN,HIGH);
 }
 
 /* --- main --- */
@@ -1002,6 +1022,20 @@ void doHtmlPageFooter() {
 
 /* --- http handler --- */
 
+String maskHttpArg(String id,byte lf) {
+  // get CGI request parameter
+  // disable line feed and html tags
+  String prm = httpServer.arg(id);
+  prm.replace("<","&lt;");
+  prm.replace(">","&gt;");
+  if (lf == 0){
+    prm.replace("\r","\n");
+    prm.replace("\n"," ");
+  }
+  prm.replace("  "," ");
+  return prm;
+}
+
 void onHttpToHome() {
   // redirect undefined url to home
   // static and small size
@@ -1035,7 +1069,7 @@ void onHttpChat() {
   doHtmlPageHeader();
   doHtmlPageBody();
   httpServer.sendContent(
-    F("<h1>Chatbox</h1><hr><a href=/chatf>create (erstellen)</a><hr><br>"));
+    F("<h1>Chatbox</h1><hr><a href=/chatf>create (erstellen)</a>&nbsp; - &nbsp;<a href=/info>Info</a><hr><br>"));
   getChat(CTYPE_HTML,1);
   doHtmlPageFooter();
   doHttpStreamEnd();
@@ -1060,34 +1094,22 @@ doHttpStreamBegin(CTYPE_HTML);
   doHttpStreamEnd();
 }
 
-String maskHttpArg(String id) {
-  // get CGI request parameter
-  // disable line feed and html tags
-  String prm = httpServer.arg(id);
-  prm.replace("<","&lt;");
-  prm.replace(">","&gt;");
-  prm.replace("\r","\n");
-  prm.replace("\n"," ");
-  prm.replace("  "," ");
-  return prm;
-}
-
 void onHttpChatAdd() {
   // handle new chat post request
   // autoredirect after 4 seconds
   httpServer.sendHeader(
     F("Refresh"), urlChatRefresh
   );
-  String ms = maskHttpArg("ms");
+  String ms = maskHttpArg("ms",0);
   if (ms.length()>0) {
     ms.replace("~","-");
     ms = ms.substring(0,16);
   }
-  String mr = maskHttpArg("mr");
+  String mr = maskHttpArg("mr",0);
   if (mr.length()>0) {
     mr = mr.substring(0,16);
   }
-  String mb = maskHttpArg("mb");
+  String mb = maskHttpArg("mb",0);
   mb=mb.substring(
     0,
     CHAT_MLEN-ms.length()-mr.length());
@@ -1128,6 +1150,100 @@ void onHttpChatRaw() {
   doHttpStreamEnd();
 }
 
+void onHttpInfo() {
+  // info page
+  doHttpStreamBegin(CTYPE_HTML);
+  doHtmlPageHeader();
+  doHtmlPageBody();
+  httpServer.sendContent(
+    F("<h1>Chatbox</h1><hr><a href=/infof>update (&auml;ndern)</a>&nbsp; - &nbsp;<a href=/chat>Chat</a><hr><br><pre>"));
+  eepromMemT eepromMem = {0};
+  EEPROM.begin(sizeof(eepromMem));
+  EEPROM.get(0, eepromMem);
+  EEPROM.end();
+  if (eepromMem.check==0xDE49){
+    httpServer.sendContent(
+      String(eepromMem.info)
+    );
+  } else {
+    httpServer.sendContent(
+      F("..."));
+  }
+  httpServer.sendContent(
+    F("</pre>"));
+  doHtmlPageFooter();
+  doHttpStreamEnd();
+}
+
+void onHttpInfoFrm() {
+  // change info form
+  // number of chars by javascript
+doHttpStreamBegin(CTYPE_HTML);
+  doHtmlPageHeader();
+  httpServer.sendContent(
+    F("<script>function onInp(){var df=document.forms.mf,cl="));
+  httpServer.sendContent(String(INFO_MLEN-1));
+  httpServer.sendContent(
+    F("-(df.ib.value.length); document.getElementById('in').innerText=cl;}</script>")); 
+  doHtmlPageBody();
+  httpServer.sendContent(
+    F("<h1>Chatbox</h1><hr><a href=/info>cancle (abbrechen)</a><hr><br><form name=mf action=/infos method=POST>Password:<br><input type=password name=ip maxlength=16 onChange=onInp() onkeyup=onInp()><br><br>Info:<br><textarea name=ib rows=10 cols=45 maxlength=")); httpServer.sendContent(String(INFO_MLEN-1));
+  httpServer.sendContent(
+    F(" onChange=onInp() onkeyup=onInp()>"));
+  eepromMemT eepromMem = {0};
+  EEPROM.begin(sizeof(eepromMem));
+  EEPROM.get(0, eepromMem);
+  EEPROM.end();
+  if (eepromMem.check==0xDE49){
+    httpServer.sendContent(
+      String(eepromMem.info)
+    );
+  }
+  httpServer.sendContent(
+    F("</textarea><br><br><input type=submit value=save> <span id=in></span></form>"));
+  doHtmlPageFooter();
+  doHttpStreamEnd();
+}
+
+void onHttpInfoSet() {
+  // handle set info post request
+  // autoredirect after 4 seconds
+  httpServer.sendHeader(
+    F("Refresh"), urlInfoRefresh
+  );
+  String ip = maskHttpArg("ip",0);
+  if (ip.length()>0) {
+    ip = ip.substring(0,16);
+  }
+  String ib = maskHttpArg("ib",1);
+  ib=ib.substring(0,INFO_MLEN);
+  if (ip.length()>0
+   && ip==String(cliPwd)) {
+    // save
+    eepromMemT eepromMem = {0};
+    EEPROM.begin(sizeof(eepromMem));
+    eepromMem.check=0xDE49;
+    ib.toCharArray(
+      eepromMem.info,ib.length()+1
+    );
+    EEPROM.put(0, eepromMem);
+    EEPROM.commit();
+    EEPROM.end();
+  } else { 
+    ib = F("error: wrong password!");
+  }
+  String html="";
+  html+=F("<html><head><meta name='viewport' content='width=device-width, initial-scale=1' /></head><body bgcolor=#003366 text=#FFFFCC link=#66FFFF vlink=#66FFFF alink=#FFFFFF><h1>Chatbox</h1><hr><a href=/info>next (weiter)</a><hr><br><pre>");
+  html+=ib;
+  html+=F("</pre></body></html>");
+  httpServer.send(
+    200, F("text/html"),html
+  );
+  html=""; ip=""; ib="";
+  requests++;
+  yield();
+}
+
 void onHttpCli() {
   // admin command-line-interface
   // and debug information
@@ -1137,7 +1253,7 @@ void onHttpCli() {
   );
   // readme
   String text= F(
-    "Version: 20221011-1552\n"
+    "Version: 20221014-1706\n"
     "/cli?cmd=login-password\n"
     "/cli?cmd=logoff\n"
     "/cli?cmd=restart\n"
@@ -1175,7 +1291,9 @@ void onHttpCli() {
   text="";
   // cli
   String cmd=httpServer.arg("cmd");
-  if (cmd == F("login-password")) {
+  if (cmd == String(cliPwd)
+    // F("login-password")
+    ) {
     flag.enableCliCommand=1;
   }
   if (flag.enableCliCommand==1) {
