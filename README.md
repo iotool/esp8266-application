@@ -25,3 +25,9 @@
 - reboot use rtc memory for chatdata
 - OTA update for ArduinoDroid
 - CLI for admin login, ota, restart
+
+## Demo ESP8266
+
+- WiFi Probe Request
+- WiFi Probe Response
+- WiFi passive ScanNetwork
