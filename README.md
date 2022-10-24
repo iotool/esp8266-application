@@ -28,6 +28,7 @@
 
 ## Demo ESP8266
 
+- WiFi Beacon
 - WiFi Probe Request
 - WiFi Probe Response
 - WiFi passive ScanNetwork
