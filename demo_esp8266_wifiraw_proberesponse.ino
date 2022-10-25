@@ -6,6 +6,9 @@
 // Turn off and on wifi at your smartphone
 // to force probe request and display the
 // second hotspot.
+//
+// Note: capture probe request only works if
+// access point is visible (hidden=false).
 
 #include <ESP8266WiFi.h>
 
@@ -80,6 +83,7 @@ void setup() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(ssid, password,1,false);
+  // Note: only works if hidden=false !!!
 
   probeRequestHandler = WiFi.onSoftAPModeProbeRequestReceived(&onProbeRequest);
 }
